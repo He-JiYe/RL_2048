@@ -5,72 +5,6 @@ import constants as c
 from collections import Counter
 import math
 
-def enhanced_heuristic(state):
-    # 空单元格数量
-    empty_cells = np.sum(state == 0)
-    
-    # 平滑性 - 相邻单元格的差值
-    smoothness = 0
-    for i in range(4):
-        for j in range(4):
-            if state[i,j] != 0:
-                value = math.log2(state[i,j])
-                for dx, dy in [(0,1), (1,0)]:
-                    if 0 <= i+dx < 4 and 0 <= j+dy < 4 and state[i+dx,j+dy] != 0:
-                        smoothness -= abs(value - math.log2(state[i+dx,j+dy]))
-    
-    # 单调性 - 检查行和列的单调递增/递减
-    # monotonicity = 0
-    # for i in range(4):
-    #     for j in range(3):
-    #         if state[i,j] != 0 and state[i,j+1] != 0:
-    #             if state[i,j] > state[i,j+1]:
-    #                 monotonicity += math.log2(state[i,j]) - math.log2(state[i,j+1])
-    #             else:
-    #                 monotonicity += math.log2(state[i,j+1]) - math.log2(state[i,j])
-    
-    # for j in range(4):
-    #     for i in range(3):
-    #         if state[i,j] != 0 and state[i+1,j] != 0:
-    #             if state[i,j] > state[i+1,j]:
-    #                 monotonicity += math.log2(state[i,j]) - math.log2(state[i+1,j])
-    #             else:
-    #                 monotonicity += math.log2(state[i+1,j]) - math.log2(state[i,j])
-    
-    # 最大数字在角落
-    max_tile = np.max(state)
-    corner_bonus = 0
-    if state[0,0] == max_tile or state[0,3] == max_tile or state[3,0] == max_tile or state[3,3] == max_tile:
-        corner_bonus = math.log2(max_tile) * 2
-
-    # 合并潜力
-    merge_potential = 0
-    for i in range(4):
-        for j in range(3):
-            if state[i,j] == state[i,j+1] and state[i,j] != 0:
-                merge_potential += math.log2(state[i,j])
-    
-    for j in range(4):
-        for i in range(3):
-            if state[i,j] == state[i+1,j] and state[i,j] != 0:
-                merge_potential += math.log2(state[i,j])
-    
-    weights = {
-        'empty': 10,
-        'smoothness': 0.1,
-        # 'monotonicity': 1.0,
-        'corner': 5,
-        'merge': 2
-    }
-    
-    score = (weights['empty'] * empty_cells +
-             weights['smoothness'] * smoothness +
-            #  weights['monotonicity'] * monotonicity +
-             weights['corner'] * corner_bonus +
-             weights['merge'] * merge_potential)
-    
-    return score
-
 class Game2048:
     def __init__(self, size=4):
         self.size = size
@@ -138,8 +72,6 @@ class Game2048:
         """执行动作并返回新状态、奖励、是否结束和额外信息"""
         old_max = self.get_max_tile()
         old_sum = sum(sum(row) for row in self.matrix)
-        old_cnt = Counter([x for row in self.matrix for x in row])
-        old_score = enhanced_heuristic(self.get_state())
 
         # 执行动作
         # 0: 上, 1: 下, 2: 左, 3: 右
@@ -161,8 +93,6 @@ class Game2048:
         # 计算奖励
         new_sum = sum(sum(row) for row in self.matrix)
         new_max = self.get_max_tile()
-        new_cnt = Counter([x for row in self.matrix for x in row])
-        new_score = enhanced_heuristic(self.get_state())
 
         # 奖励策略：合并得分 + 最大数字提升奖励
         merge_reward = (new_sum - old_sum) / 10.0  # 合并得分
@@ -171,7 +101,6 @@ class Game2048:
             max_tile_reward = np.log2(new_max) - np.log2(old_max)  # 最大数字提升奖励
         
         reward = np.log2(new_max) / 11 + max_tile_reward
-        reward += (new_score - old_score) / 30
 
         # 如果移动无效，给予负奖励
         if not done:
