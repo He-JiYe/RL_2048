@@ -4,13 +4,13 @@
 # 安装
 1. 克隆项目到本地：
 ```bash
-git clone 
-cd RL2048
+git clone https://github.com/He-JiYe/RL_2048
+cd RL_2048
 ```
 
 2. 安装依赖：
 ```bash
-pip install torch numpy tkinter matplotlib
+pip install torch numpy tkinter matplotlib 
 ```
 
 # 使用方法
@@ -81,5 +81,8 @@ __奖励设置:__
 
 __测试结果:__
 PPO训练更快，且表现优于DQN，不过都只学到了一个更稳定的策略，最大只能达到1024。
+
+# 改进
+欢迎大家使用这份代码进行实验和改进，奖励函数在文件```game.py```中, 网络结构在```utils.py```中。
 
 
