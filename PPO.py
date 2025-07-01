@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions import Categorical
-from utils import Actor, DoubleCritic
+from utils import Actor, Critic
 from utils import compute_advantage, normalize
 from game import Game2048
 from tqdm import tqdm
@@ -27,13 +27,18 @@ class PPOAgent:
         self.batch_size = 64
         self.model_path = 'model/ppo_agent_model.pth'
         
+        self.conv = True
+
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"使用设备: {self.device}")
         
-        self.actor = Actor(self.state_size, 128, self.action_size).to(self.device)
-        self.critic = DoubleCritic(self.state_size, 128).to(self.device)
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.actor_learning_rate, weight_decay=self.weight_decay)
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.critic_learning_rate, weight_decay=self.weight_decay)
+        self.actor = Actor(self.state_size, 128, self.action_size, self.conv).to(self.device)
+        self.critic = Critic(self.state_size, 128, self.conv).to(self.device)
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.actor_learning_rate, weight_decay=self.weight_decay, eps=1e-5)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.critic_learning_rate, weight_decay=self.weight_decay, eps=1e-5)
+        scheduler1 = torch.optim.lr_scheduler.LinearLR(self.actor_optimizer, 0.5, 0.1, 10000)
+        scheduler2 = torch.optim.lr_scheduler.LinearLR(self.critic_optimizer, 0.5, 0.1, 10000)
+        self.scheduler = [scheduler1, scheduler2]
 
         if os.path.exists(self.model_path):
             self.load_model()
@@ -44,7 +49,10 @@ class PPOAgent:
         log_state[mask] = np.log2(state[mask])
         if np.max(log_state) > 0:
             log_state = log_state / 11.0  
-        return log_state.flatten()
+        if self.conv:
+            return np.expand_dims(log_state, 0)
+        else:
+            return log_state.flatten()
 
     def choose_action(self, state, available_actions):
         if not any(available_actions):
@@ -79,20 +87,16 @@ class PPOAgent:
         old_log_probs = torch.tensor(transition_dict['log_probs'], dtype=torch.float32).to(self.device)
         mask = torch.tensor(transition_dict['mask'], dtype=torch.long, device=self.device)
 
-        states = normalize(states)
-        next_states = normalize(next_states)
-        rewards = normalize(rewards)  
-
         with torch.no_grad():
-            values = self.critic.get_min_value(states).squeeze(1)  
-            next_values = self.critic.get_min_value(next_states).squeeze(1)  
+            values = self.critic(states).squeeze(1)  
+            next_values = self.critic(next_states).squeeze(1)  
 
         td_target = rewards + self.discount_factor * next_values * (1 - dones)
         td_error = td_target - values
         advantage = compute_advantage(self.discount_factor, self.lmbda, td_error)
         advantage = normalize(advantage)  
 
-        actor_losses, critic_losses = [], []
+        actor_losses, critic_losses, entropys = [], [], []
         for _ in range(self.epochs):
             for batch in self.sample_batches(transition_dict):
                 states_b = states[batch]
@@ -115,12 +119,8 @@ class PPOAgent:
                 entropy = dist.entropy().mean()
                 actor_loss = -torch.min(surr1, surr2).mean() - 0.005 * entropy
                 
-                values1, values2 = self.critic(states_b)
-                values1 = values1.squeeze(1)  
-                values2 = values2.squeeze(1)  
-                critic_loss1 = F.mse_loss(values1, td_targets_b.detach())
-                critic_loss2 = F.mse_loss(values2, td_targets_b.detach())
-                critic_loss = critic_loss1 + critic_loss2
+                values = self.critic(states_b).squeeze(1)  
+                critic_loss = F.mse_loss(values, td_targets_b.detach())
 
                 self.actor_optimizer.zero_grad()
                 self.critic_optimizer.zero_grad()
@@ -130,16 +130,19 @@ class PPOAgent:
                 nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
                 self.actor_optimizer.step()
                 self.critic_optimizer.step()
+                for scheduler in self.scheduler:
+                    scheduler.step()
                 
                 actor_losses.append(actor_loss.item())
                 critic_losses.append(critic_loss.item())
+                entropys.append(entropy.item())
 
-        return np.mean(actor_losses), np.mean(critic_losses)
+        return np.mean(actor_losses), np.mean(critic_losses), np.mean(entropys)
 
     def train(self, episodes=1000, epochs=10):
         game = Game2048(self.game_size)
         result = {"return": [], "max_tile": [], "board_score": [],
-                  "turns": [], "actor_loss": [], "critic_loss": [] }
+                  "turns": [], "actor_loss": [], "critic_loss": [], 'entropy':[] }
 
         for i in range(epochs):
             with tqdm(total=int(episodes/10), desc='Iteration %d' % i) as pbar:
@@ -171,7 +174,7 @@ class PPOAgent:
 
                     for key, value in transition_dict.items():
                         transition_dict[key] = np.array(value)
-                    actor_loss, critic_loss = self.replay(transition_dict)  
+                    actor_loss, critic_loss, entropy = self.replay(transition_dict)  
 
                     result["return"].append(episode_return)
                     result["max_tile"].append(game.get_max_tile().item())
@@ -179,10 +182,11 @@ class PPOAgent:
                     result["turns"].append(turn)  
                     result['actor_loss'].append(actor_loss)
                     result['critic_loss'].append(critic_loss)
+                    result['entropy'].append(entropy)
 
                     if (i_episode+1) % 10 == 0:
-                        pbar.set_postfix({'episode': '%d' % (episodes/10 * i + i_episode+1), 'return': '%.3f' % np.mean(result["return"][-10:]), 'board score': '%.3f' % np.mean(
-                            result['board_score'][-10:]), 'max tile': '%.3f' % np.mean(result['max_tile'][-10:]), 'ac loss': '%.3f' % np.mean(result['actor_loss'][-10:]), 'cr loss': '%.3f' % np.mean(result['critic_loss'][-10:])})
+                        pbar.set_postfix({'episode': '%d' % (episodes/10 * i + i_episode+1), 'return': '%.1f' % np.mean(result["return"][-10:]), 'board score': '%.1f' % np.mean(
+                            result['board_score'][-10:]), 'max tile': '%.1f' % np.mean(result['max_tile'][-10:]), 'entropy': '%.3f' % np.mean(result['entropy'][-10:]), 'lr': '%.5f' % self.scheduler[0].get_last_lr()[0]})
                     pbar.update(1)
 
             self.save_model()  

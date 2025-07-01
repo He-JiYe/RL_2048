@@ -16,7 +16,7 @@ class QLearningAgent:
         self.discount_factor = discount_factor
         self.batch_size = 64
         self.n_step = n_step
-        self.memory = PrioritizedReplayBuffer(capacity=100000)
+        self.memory = PrioritizedReplayBuffer(capacity=500000)
         self.n_step_buffer = deque(maxlen=n_step)
         self.model_path = 'model/rainbow_dqn_agent_model.pth'
         
@@ -29,16 +29,16 @@ class QLearningAgent:
         self.support = torch.linspace(v_min, v_max, atoms).to(self.device)
         self.delta_z = (v_max - v_min) / (atoms - 1)
 
-        self.model = C51Network(self.state_size, 128, self.action_size, 
+        self.model = C51Network(128, self.action_size, 
                                atoms=atoms, v_min=v_min, v_max=v_max).to(self.device)
-        self.target_model = C51Network(self.state_size, 128, self.action_size, 
+        self.target_model = C51Network(128, self.action_size, 
                                       atoms=atoms, v_min=v_min, v_max=v_max).to(self.device)
         self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=1e-5)
-        self.update_target_model()
 
         if os.path.exists(self.model_path):
             self.load_model()
-    
+        self.update_target_model()
+
     def update_target_model(self):
         self.target_model.load_state_dict(self.model.state_dict())
     
@@ -49,7 +49,7 @@ class QLearningAgent:
 
         if np.max(log_state) > 0:
             log_state = log_state / 11.0  
-        return log_state.flatten()
+        return log_state
     
     def _get_n_step_info(self):
         reward, next_state, done = self.n_step_buffer[-1][-3:]
@@ -119,10 +119,10 @@ class QLearningAgent:
         
         states, actions, rewards, next_states, dones, indices, weights = self.memory.sample(self.batch_size)
 
-        states = states.to(self.device)
+        states = states.unsqueeze(1).to(self.device)
         actions = actions.to(self.device)
         rewards = rewards.to(self.device)
-        next_states = next_states.to(self.device)
+        next_states = next_states.unsqueeze(1).to(self.device)
         dones = dones.to(self.device)
         weights = weights.to(self.device)
 
@@ -166,7 +166,7 @@ class QLearningAgent:
         except Exception as e:
             print(f"加载模型失败: {e}")
     
-    def train(self, episodes=1000, max_steps=10000, save_interval=100, target_update_interval=10, callback=None):
+    def train(self, episodes=1000, max_steps=50000, save_interval=100, target_update_interval=10, callback=None):
         self.model.train()
 
         game = Game2048(self.game_size)
@@ -181,14 +181,27 @@ class QLearningAgent:
             episode_loss = []
             episode_rewards = []
             
+            while game.get_max_tile() < 1024 and episode > 100 and episode % 3 == 0:
+                self.model.eval()
+                available_actions = game.get_available_actions()
+                if np.sum(available_actions) == 0:
+                    state = game.reset()
+
+                action = self.choose_action(state, available_actions)
+                state, reward, done, info = game.move(action)
+                if done:
+                    state = game.reset()
+
             for step in range(max_steps):
+                self.model.train()
+
                 available_actions = game.get_available_actions()
                 if np.sum(available_actions) == 0:
                     break
                 
                 action = self.choose_action(state, available_actions)
                 next_state, reward, done, info = game.move(action)
-
+                
                 self.remember(state, action, reward, next_state, done)
 
                 if len(self.memory.buffer) >= self.batch_size:
@@ -257,62 +270,3 @@ class QLearningAgent:
             return action, q_values
         return self.model.get_action(state_tensor, available_actions)
     
-if __name__ == "__main__":
-    import time
-    from game import Game2048
-    from visualization import TrainingVisualizer, GameVisualizer
-
-    def train_agent(episodes=1000):
-        print(f"开始训练 DQN 代理，计划训练{episodes}轮...")
-        agent = QLearningAgent()
-        scores, max_tiles = agent.train(episodes=episodes)
-        
-        print(f"训练完成！")
-        print(f"最后10轮平均分数: {sum(scores[-10:]) / 10:.2f}")
-        print(f"最后10轮平均最大数字: {sum(max_tiles[-10:]) / 10:.2f}")
-
-    def agent_play():
-        print(f"让训练好的 DQN 代理自动游玩...")
-        
-        agent = QLearningAgent() 
-        
-        game = Game2048()
-        state = game.reset()
-        total_reward = 0
-        done = False
-        steps = 0
-
-        visualizer = GameVisualizer()
-        visualizer.update_grid_cells(state)
-        visualizer.update_info(game.score, game.get_max_tile(), steps)
-        
-        while not done and steps < 1000: 
-            available_actions = game.get_available_actions()
-            if np.sum(available_actions) == 0:
-                break
-            
-            action, q_values = agent.play_move(game, return_q_values=True)
-            if action is None:
-                break
-
-            visualizer.update_q_values(q_values)
-            
-            next_state, reward, done, info = game.move(action)
-            total_reward += reward
-            state = next_state
-            steps += 1
-
-            visualizer.update_grid_cells(state)
-            visualizer.update_info(game.score, game.get_max_tile(), steps, action)
-            visualizer.update()
-
-            print(f"步骤 {steps}, 动作: {['上', '下', '左', '右'][action]}, 分数: {info['score']}, 最大数字: {info['max_tile']}")
-
-            time.sleep(0.3)
-        
-        print(f"游戏结束！总步数: {steps}, 总分数: {game.score}, 最大数字: {game.get_max_tile()}")
-        visualizer.mainloop()  
-
-    train_agent(episodes=2000)
-    # agent_play()
-

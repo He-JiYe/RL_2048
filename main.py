@@ -50,7 +50,6 @@ def agent_play(agent_type, trained_agent=None):
         agent = trained_agent
     
     print(f"让训练好的 {agent_type.upper()} 代理自动游玩...")
-    
     game = Game2048()
     state = game.reset()
     total_reward = 0
@@ -61,7 +60,7 @@ def agent_play(agent_type, trained_agent=None):
     visualizer.update_grid_cells(state)
     visualizer.update_info(game.score, game.get_max_tile(), steps)
     
-    while not done and steps < 1000:  
+    while not done and steps < 10000:  
         available_actions = game.get_available_actions()
         if not available_actions:
             break
@@ -89,7 +88,7 @@ def agent_play(agent_type, trained_agent=None):
 
         print(f"步骤 {steps}, 动作: {['上', '下', '左', '右'][action]}, 分数: {info['score']}, 最大数字: {info['max_tile']}")
 
-        time.sleep(0.3)
+        time.sleep(0.1)
     
     print(f"游戏结束！总步数: {steps}, 总分数: {game.score}, 最大数字: {game.get_max_tile()}")
     visualizer.mainloop()  

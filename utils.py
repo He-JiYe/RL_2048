@@ -2,7 +2,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.nn.init as init
 from collections import namedtuple
 
 class NoisyLinear(nn.Module):
@@ -44,7 +43,7 @@ class NoisyLinear(nn.Module):
         return F.linear(x, weight, bias)
     
 class C51Network(nn.Module):
-    def __init__(self, input_size, hidden_size, action_size, atoms=51, v_min=-10, v_max=10):
+    def __init__(self, hidden_size, action_size, atoms=51, v_min=-10, v_max=10):
         super(C51Network, self).__init__()
         self.atoms = atoms
         self.v_min = v_min
@@ -55,17 +54,22 @@ class C51Network(nn.Module):
         self.support = torch.linspace(v_min, v_max, atoms).view(1, 1, atoms).to(self.device)
         self.delta_z = (v_max - v_min) / (atoms - 1)
         
-        self.fc1 = NoisyLinear(input_size, 64).to(self.device)
-        self.fc2 = NoisyLinear(64, 128).to(self.device)
-        self.fc3 = NoisyLinear(128, hidden_size).to(self.device)
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(1, 64, 2, 1),
+            nn.ReLU(),
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(64, hidden_size, 2, 1),
+            nn.ReLU()
+        )
 
-        self.af = NoisyLinear(hidden_size, action_size * atoms).to(self.device)
-        self.vf = NoisyLinear(hidden_size, atoms).to(self.device)  
+        self.af = NoisyLinear(4 * hidden_size, action_size * atoms).to(self.device)
+        self.vf = NoisyLinear(4 * hidden_size, atoms).to(self.device)  
 
     def forward(self, x, log=False):
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = F.relu(self.fc3(x))
+        batch_size = x.shape[0]
+        x = self.conv1(x)
+        x = self.conv2(x).view(batch_size, -1)
 
         a = self.af(x) 
         a = a.view(-1, self.action_size, self.atoms)
@@ -89,65 +93,70 @@ class C51Network(nn.Module):
             return torch.argmax(q_values, dim=1).item()
 
     def reset_noise(self):
-        self.fc1.reset_noise()
-        self.fc2.reset_noise()
-        self.fc3.reset_noise()
+        self.af.reset_noise()
+        self.vf.reset_noise()
+
+def orthogonal_init(layer, gain=1.0):
+    nn.init.orthogonal_(layer.weight, gain=gain)
+    nn.init.constant_(layer.bias, 0)
 
 class Actor(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
+    def __init__(self, input_dim, hidden_dim, output_dim, conv=False):
         super(Actor, self).__init__()
-        self.fc1 = nn.Linear(input_dim, 64)
-        self.fc2 = nn.Linear(64, 128)
-        self.fc3 = nn.Linear(128, hidden_dim)
-        self.fc4 = nn.Linear(hidden_dim, output_dim)
-
-    def _init_weights(self):
-        init.orthogonal_(self.fc1.weight, gain=nn.init.calculate_gain('relu'))
-        init.orthogonal_(self.fc2.weight, gain=nn.init.calculate_gain('relu'))
-        init.orthogonal_(self.fc3.weight, gain=nn.init.calculate_gain('relu'))
+        self.conv = conv
+        if conv:
+            self.conv1 = nn.Sequential(
+                nn.Conv2d(1, 64, 3),
+                nn.Tanh(),
+                nn.Conv2d(64, hidden_dim, 2),
+                nn.Tanh()
+            )
+        else:
+            self.fc1 = nn.Linear(input_dim, 128)
+            self.fc2 = nn.Linear(128, hidden_dim)
+            orthogonal_init(self.fc1)
+            orthogonal_init(self.fc2)
+        self.fc3 = nn.Linear(hidden_dim, output_dim)
+        orthogonal_init(self.fc3)
 
     def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = F.relu(self.fc3(x))
-        x = F.softmax(self.fc4(x), dim=-1)
+        if self.conv:
+            batch_size = x.shape[0]
+            x = self.conv1(x).view(batch_size, -1)
+        else:
+            x = F.tanh(self.fc1(x))
+            x = F.tanh(self.fc2(x))
+        x = F.softmax(self.fc3(x), dim=-1)
         return x
     
 class Critic(nn.Module):
-    def __init__(self, input_dim, hidden_dim):
+    def __init__(self, input_dim, hidden_dim, conv=False):
         super(Critic, self).__init__()
-        self.fc1 = nn.Linear(input_dim, 64)
-        self.fc2 = nn.Linear(64, 128)
-        self.fc3 = nn.Linear(128, hidden_dim)
-        self.fc4 = nn.Linear(hidden_dim, 1)
-
-    def _init_weights(self):
-        init.orthogonal_(self.fc1.weight, gain=nn.init.calculate_gain('relu')) 
-        init.orthogonal_(self.fc2.weight, gain=nn.init.calculate_gain('relu')) 
-        init.orthogonal_(self.fc3.weight, gain=nn.init.calculate_gain('relu')) 
-        init.orthogonal_(self.fc4.weight, gain=nn.init.calculate_gain('Linear')) 
+        self.conv = conv
+        if conv:
+            self.conv1 = nn.Sequential(
+                nn.Conv2d(1, 64, 3),
+                nn.Tanh(),
+                nn.Conv2d(64, hidden_dim, 2),
+                nn.Tanh()
+            )
+        else:
+            self.fc1 = nn.Linear(input_dim, 128)
+            self.fc2 = nn.Linear(128, hidden_dim)
+            orthogonal_init(self.fc1)
+            orthogonal_init(self.fc2)
+        self.fc3 = nn.Linear(hidden_dim, 1)
+        orthogonal_init(self.fc3)
 
     def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = F.relu(self.fc3(x))
-        return self.fc4(x)
+        if self.conv:
+            batch_size = x.shape[0]
+            x = self.conv1(x).view(batch_size, -1)
+        else:
+            x = F.tanh(self.fc1(x))
+            x = F.tanh(self.fc2(x))
+        return self.fc3(x)
 
-class DoubleCritic(nn.Module):
-    def __init__(self, input_dim, hidden_dim):
-        super(DoubleCritic, self).__init__()
-        self.critic1 = Critic(input_dim, hidden_dim)
-        self.critic2 = Critic(input_dim, hidden_dim)
-
-    def forward(self, state):
-        value1 = self.critic1(state)
-        value2 = self.critic2(state)
-        return value1, value2
-    
-    def get_min_value(self, state):
-        value1, value2 = self.forward(state)
-        return torch.min(value1, value2)
-    
 Experience = namedtuple('Experience', ['state', 'action', 'reward', 'next_state', 'done'])
 class PrioritizedReplayBuffer:
     def __init__(self, capacity, alpha=0.6, beta=0.4, beta_increment=0.001):
@@ -222,3 +231,48 @@ def normalize(x):
     mean = x.mean()
     std = x.std() + 1e-8
     return (x - mean) / std
+
+class RunningMeanStd:
+    def __init__(self, shape): 
+        self.n = 0
+        self.mean = np.zeros(shape)
+        self.S = np.zeros(shape)
+        self.std = np.sqrt(self.S)
+
+    def update(self, x):
+        x = np.array(x)
+        self.n += 1
+        if self.n == 1:
+            self.mean = x
+            self.std = x
+        else:
+            old_mean = self.mean.copy()
+            self.mean = old_mean + (x - old_mean) / self.n
+            self.S = self.S + (x - old_mean) * (x - self.mean)
+            self.std = np.sqrt(self.S / self.n )
+
+class Normalization:
+    def __init__(self, shape):
+        self.running_ms = RunningMeanStd(shape=shape)
+
+    def __call__(self, x, update=True):
+        if update:  
+            self.running_ms.update(x)
+        x = (x - self.running_ms.mean) / (self.running_ms.std + 1e-8)
+        return x
+
+class RewardScaling:
+    def __init__(self, shape, gamma):
+        self.shape = shape  
+        self.gamma = gamma  
+        self.running_ms = RunningMeanStd(shape=self.shape)
+        self.R = np.zeros(self.shape)
+
+    def __call__(self, x):
+        self.R = self.gamma * self.R + x
+        self.running_ms.update(self.R)
+        x = x / (self.running_ms.std + 1e-8)  
+        return x
+
+    def reset(self):  
+        self.R = np.zeros(self.shape)
